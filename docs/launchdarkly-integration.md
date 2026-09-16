@@ -87,7 +87,9 @@ these into the AgentControl library:
 2. **Credential shape mismatch.** Writing to the library needs a write token.
    The kit's whole posture is that it holds no write credential to anything
    (`STACK.md` "Access posture"). A per-incident library write is the one thing
-   you'd have to carve out, and it's the least valuable one.
+   you'd have to carve out, and it's the least valuable one. *(Relaxing this
+   one is analysed in §10 — it turns out to be the only objection of the four
+   that a write grant actually removes.)*
 3. **Read shape mismatch.** Triage step 3 says: search `lessons.md` for the
    class's tag and read only matching entries — "never ingest the whole file;
    it grows unbounded by design." A snippet is injected wholesale into a
@@ -382,7 +384,7 @@ Verify each of these before planning around it; several moved in the last month.
 | Primitive | Status | Consequence for this plan |
 |---|---|---|
 | Feature flags, segments, contexts, audit log | GA | Path A works today. |
-| MCP server (hosted, OAuth) | GA — covers flags, AgentControl configs, observability | **Can create/update/delete.** Scope the kit's token to read-only via RBAC, or use a reader REST token instead. A write-capable connector in an agent bound by rule 1 is a footgun. |
+| MCP server (hosted, OAuth) | GA — covers flags, AgentControl configs, observability | **Can create/update/delete**, including three unconfirmed permanent deletes. Scope the kit's identity to read-only via RBAC, or use a reader REST token instead. The hosted server has no tool-allowlist or read-only flag; the local server does (`--scope read`, `--tool`). See §10. |
 | Prompt snippets | GA | The available stand-in for playbook references under Path B. |
 | Judges (built-in + custom), online/offline evals, datasets, playgrounds | GA; online evals need project-level enablement and a recent AI SDK | The eval path is buildable now. |
 | Agent graphs | GA — Python and Node AI SDK only | Fine; a Path B service would be Python or Node anyway. |
@@ -491,6 +493,154 @@ would most change the plan: if Agent Skills shipped with multi-file bundle
 support, steps 3–6 reorder — the playbook layer moves to LaunchDarkly first and
 the agent-graph question gets much more attractive, because the harness would
 already live there.
+
+---
+
+## 10. Addendum: what if the agent could write lessons via the LD MCP?
+
+Asked as a follow-up: suppose we relax the credential constraint and give the
+kit the LaunchDarkly MCP server so it can write lessons into a primitive.
+
+**It removes objection 2 of the four in §2 and leaves the other three standing
+— and it makes objection 4 materially worse.** The underlying reason is a
+design conflict, not a missing feature:
+
+> Lessons are valuable *because* they are cheap and unreviewed (rule 8: log
+> without asking). Library primitives are valuable *because* they are governed
+> — versioned, approved, audited, delivered. Those two properties cannot both
+> hold on one object. Any write path you build either governs the lesson (and
+> loses rule 8) or ungoverns the primitive (and loses the reason to use it).
+
+The rest of this section is what that means concretely.
+
+### 10a. The instrument matters more than the permission
+
+Two corrections to what I hedged on earlier, both load-bearing:
+
+**A narrow write grant is expressible — for configs.** `aiconfig` is a real
+resource in the role system, written `proj/*:env/*:aiconfig/*`, and **the
+resource identifier is the config key**
+([resources](https://launchdarkly.com/docs/home/account/roles/role-resources),
+[actions](https://launchdarkly.com/docs/home/account/roles/role-actions)). So
+least privilege is a real policy, not an aspiration:
+
+```json
+[
+  { "effect": "allow",
+    "actions": ["updateAIConfigVariation"],
+    "resources": ["proj/oncall-agent:env/production:aiconfig/oncall-lessons"] },
+  { "effect": "allow", "actions": ["viewProject"],
+    "resources": ["proj/oncall-agent"] }
+]
+```
+
+One action, one config key, one project. Note the asymmetry that follows:
+**there is no per-skill RBAC yet** — the Agent Skills PRD lists it at GA, with
+Beta using project-scoped library reader/writer roles. So if lessons live in a
+*config*, the grant can be surgical today. If they live in a *skill*, the
+narrowest available grant is "write every skill in the project."
+
+**The hosted MCP server is the wrong instrument regardless.** Its own docs
+recommend a Writer base role or Developer preset — "permission to create, read,
+update, and delete flags and AgentControl configs" — and it exposes no
+`--scope`/`--tool` controls. Those exist only on the **local** server, which is
+otherwise positioned for federal/EU use. LaunchDarkly's own
+[security review of AI prompt distribution](https://launchdarkly.atlassian.net/wiki/spaces/~7120202d087ecc5d974af4bdfb1fc4a3791aba/pages/4578181186)
+(March 2026) says this plainly about the MCP server at v0.6.0:
+
+- **19 tools — 9 read-only, 10 write, including 3 permanent deletes**
+  (`delete-feature-flag`, `delete-ai-config`, `delete-ai-config-variation`).
+- **No confirmation gate on any destructive operation.** The internal catfood
+  MCP requires `confirm: true`; the shipped server does not.
+- The docs' own recommended custom role grants `actions: ["*"]` on all flags and
+  all configs in all environments — flagged in review as "the widest permission
+  surface possible."
+- **No structured audit trail in the MCP server** — debug console logging only,
+  which the review notes "makes it harder to trace agent-initiated actions back
+  to the prompt/conversation that triggered them." (The LD API does audit-log
+  mutative operations server-side.)
+- A P0 recommendation to make `--scope read` the documented default.
+
+That last bullet is the one that actually bites this kit. Rule 3a requires every
+decision to be reconstructible from a log — "was this page absolutely necessary
+on a Friday night?" must be answerable. An agent-initiated library write that
+cannot be traced back to the conversation that caused it is the same gap in a
+different place.
+
+So if you do this, the shape is: **local MCP server, pinned version (not
+`npx -y`), `--tool` allowlisted to the one write tool, plus the scoped custom
+role above.** Not the hosted server with an OAuth grant.
+
+And note what that costs to gain what: ten write tools and three unconfirmed
+permanent deletes enter the agent's tool surface so that one append can happen.
+RBAC is the real boundary and can hold — but the kit's guarantee stops being
+"it holds no write credential" and becomes "its credential is scoped
+correctly." Those are different promises, and only the first one is checkable
+by reading `STACK.md`.
+
+### 10b. Each candidate primitive fails on a different axis
+
+Even with a perfect credential, there is no good target object:
+
+| Target | Write mechanics | Why it fails |
+|---|---|---|
+| **Prompt snippet** | Edit creates a new version; referencing variations stay **pinned** and there is no automatic propagation | Every append needs a *second* write to re-pin every referencing variation. That is a release per lesson, not a log line. Skip the re-pin and the agent never reads its own lessons. |
+| **AgentControl config variation** | `updateAIConfigVariation` edits in place; the SDK serves current, so no re-pin | The variation body *is* the agent's instructions. This puts text mined from incident threads directly into the prompt — the worst available location. Also: unbounded growth is paid as context on every triage. |
+| **Agent Skill** | Lazy-loaded, so the read shape is finally right | Not shipped; needs FDv2; Beta is one `SKILL.md` **≤ 50 KB** (a hard ceiling an append-only log reaches in roughly 80 entries, after which writes fail or the agent must silently prune); no per-skill RBAC; and skill content is delivered to **every server-side FDv2 connection in the environment, with no per-connection subsetting in Beta**. |
+
+That last clause is objection 4, amplified. Today a poisoned lesson sits in
+`lessons.md`, where triage reads it *as data* and a human sees it at promotion
+time. As a skill it becomes a payload the platform delivers into the context of
+every agent in that environment. The kit's own threat model already names this
+surface — anyone who can post in a watched alert channel can write text the
+agent might mine (rule 9a) — and LD's security review independently describes
+the matching chain: agent reads poisoned content via MCP, then acts on it
+through a write tool with no confirmation. Write access is what closes the
+circuit between those two halves.
+
+### 10c. What a write grant *is* worth, in priority order
+
+Reframed as "what should be writable," the answer isn't nothing:
+
+1. **Metric and feedback events — do this, it needs no MCP write at all.**
+   "Lesson #merge-queue fired on INC-2041 and the diagnosis was verified" is an
+   append-only telemetry event, not library state. It doesn't engage rule 1, it
+   needs no library permission, and it is the part of the lessons loop that is
+   genuinely missing today: the kit records *what* was learned but never
+   *whether it helped*. This is where the value the question is reaching for
+   actually lives.
+2. **Wait for source-of-truth sync Phase 1b, which ships exactly this.** Its
+   scope includes **UI edits opening a PR** — a library-side write that
+   materialises as a reviewed change instead of a live one. That is
+   "agent-writable with review" as a platform primitive rather than a bespoke
+   carve-out, and it satisfies rule 9 by construction. Phase 1b is GA scope for
+   prompts/tools/judges; snippets are Phase 2 and skills Phase 3.
+3. **If you want it before then, copy the rule 1a shape — and price it
+   honestly.** The kit already has one sanctioned write exception: additive
+   only, never modify or delete, explicit per-item approval in the channel,
+   every write logged with its approval link. Apply that to lessons and you get
+   a defensible design — and immediately discover the cost, which is that
+   per-lesson channel approval is incompatible with rule 8. You would be
+   spending a human approval per incident to move a log entry from a file into
+   a library that reads it less well. That trade is the whole argument for the
+   Layer 1 / Layer 2 split in §2: the split is not a workaround for missing
+   write access, it is the answer, and write access does not change it.
+4. **One genuinely good target, if you want a library write today:** the
+   promoted layer, written by CI rather than by the agent. The PR merges, the
+   Action publishes. A machine writes, with review upstream of it, and the
+   agent stays read-only. This also captures the degraded-mode benefit (policy
+   and playbooks readable when the code host is the incident) without opening
+   any agent write path at all.
+
+**Confidence: high** on 10a and 10b — the RBAC granularity, the MCP tool
+surface, the pinning semantics, and the FDv2 broadcast behaviour are all
+documented rather than inferred. **Medium** on the Phase 1b recommendation,
+since that scope could move. The observation that would most change 10c: if
+Phase 1b's "UI edits open a PR" turns out to cover API-originated writes too
+and not just the UI, it becomes the answer outright and items 3 and 4 collapse
+into it.
+
+---
 
 A side note worth raising internally: the kit is an unusually clean design
 partner for AgentControl. It's a real agent with a written safety contract, a
