@@ -1,47 +1,54 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# MVP: dogfooding the on-call kit with two LaunchDarkly seams
+# MVP: validating the two LaunchDarkly seams from a Claude Code session
 
 **Status:** proposal · **Date:** 2026-09-16 · **Companion to:** `launchdarkly-integration.md`
 
-Decisions taken:
+Decisions and constraints:
 
-- **Operator surface: Claude Tag as the kit ships today.** @Claude in the
-  incident channel. No LaunchDarkly Slack app work.
-- **Audience: internal dogfood first.** One LaunchDarkly team's real on-call.
-  Schemas stay informal; the goal is evidence, not a product surface.
+- **Audience: internal dogfood first.** Evidence, not a product surface.
+- **Operator surface: Claude Tag was the preference — but attaching connectors
+  to Claude Tag needs a Claude org Owner, which isn't self-serve.** So Claude
+  Tag moves out of the MVP.
 
-Those two choices cut most of the previously-proposed build. What's left is
-small enough to state in one sentence:
-
-> **Run the on-call kit as designed, on a real team, with LaunchDarkly
-> supplying the policy and receiving the verdicts.**
-
-Two seams, one of which is documentation. Everything else in this repo already
-works.
-
----
-
-## 1. What the decisions removed
-
-| Previously proposed | Status now | Why |
-|---|---|---|
-| Block Kit action row in `chat-integrations` | **Cut** | Claude Tag can read reactions and threads directly. No Slack app change needed. |
-| `/notify-channel` path for non-Vega agents | **Cut** | Only relevant once a second agent exists, which is post-MVP. |
-| Vega as the runtime | **Cut from MVP** (kept as a side experiment, §6) | Claude Tag is the surface. Vega's repo-instructions behaviour stays interesting but isn't on the critical path. |
-| Public contract with versioning commitments | **Cut** | Dogfood. Two JSON shapes in a doc, changed freely. |
-| The read-only-vs-agent-mode gap as a blocker | **Downgraded to product feedback** | That gap blocks a customer-facing MVP, not a dogfood where the runtime is Claude Tag. Still worth filing (§7). |
-| Proving "agent-agnostic" by running a second agent | **Deferred** | Agnosticism now lives in the schemas as a preserved seam, not a demonstrated property (§6). |
-
-What this leaves is close to the cheapest three steps of the companion
-document's §8 — which is the right place for an MVP to land.
+That last constraint reshapes the sequencing and, as it happens, improves the
+first milestone. **Neither seam needs Claude Tag.** Claude Tag is how the kit
+gets *deployed* into a channel; it is not how either seam gets *validated*. The
+kit already treats Claude Code as an equal surface — `README.md` offers
+"`@Claude run the oncall-setup skill` (or type the same in a Claude Code
+session opened in the repo)", and `test-fixtures/RUNBOOK.md` exists precisely to
+run the whole thing with "zero connections, zero admin."
 
 ---
 
-## 2. Seam 1 — policy as a flag
+## 1. Three tiers, split by what you can do alone
 
-One JSON flag, `oncall-policy`, replacing the prose tables in `ONCALL.md`.
-Targetable by service and environment, changed with approval, audited.
+| Tier | What it is | Needs | LaunchDarkly involved |
+|---|---|---|---|
+| **0** | Claude Code against `test-fixtures/` — 48 fictional incidents, an answer key, the full setup run and a graded replay | Nothing. A clone and a Claude Code session. | No |
+| **1 — the MVP** | Claude Code + your own LaunchDarkly project: read `oncall-policy`, use real flag history and observability as triage evidence, emit verdict events from graded replays | Your own LD account and a read-only token. Normally self-serve. | **Yes, both seams** |
+| **2 — deferred** | Claude Tag in a real incident channel: live alerts, ambient operation, Slack reaction verdicts | A Claude org Owner to attach connectors, plus a host team | Yes |
+
+The point of the split: **Tier 1 produces the artifact that buys Tier 2.** Don't
+ask an Owner for connector access on a hypothesis — ask with a graded replay
+table in hand. The kit says as much about its own grading table: it "is also
+what you show teammates who ask whether this is worth adopting."
+
+Tier 0 is worth half a day on its own. It's the kit's regression test, it needs
+no permissions, and it tells you whether the playbook machinery is worth
+wiring to anything.
+
+---
+
+## 2. Tier 1 is still both seams
+
+Nothing about the two seams from the previous draft changes. Only their front
+ends do.
+
+### Seam 1 — policy as a flag
+
+One JSON flag, `oncall-policy`, in your own LD project, replacing the prose
+tables in `ONCALL.md`:
 
 ```jsonc
 {
@@ -58,220 +65,196 @@ Targetable by service and environment, changed with approval, audited.
 }
 ```
 
-**Read path:** the LD MCP server, scoped read-only (§5). Claude reads the flag
-at the start of an investigation exactly as it reads `ONCALL.md` today.
+**Read path, in order of preference:**
 
-**What this buys over a markdown table:** `posture` becomes a live kill switch
-rather than a routine edit — the thing someone needs at 3am. Paging thresholds
-get approvals and an audit trail. And the same JSON is machine-readable for the
-deterministic alert rules the kit drafts.
+1. **A read-only LD API token + curl or a tiny script.** Fully self-serve, no
+   MCP, no admin, guaranteed to work. Use a Reader base role or a custom role
+   with only the view actions the playbooks need.
+2. **The LD MCP server added to your own Claude Code** —
+   `https://mcp.launchdarkly.com/mcp/launchdarkly` over OAuth, authorized as
+   you, inheriting your own role. Adding an MCP server to Claude Code is
+   normally a per-user or per-project setting and needs no Claude org Owner —
+   unlike Claude Tag. (Caveat: some orgs restrict MCP by managed policy. If
+   yours does, option 1 still works.)
 
-**What it does not change:** policy is still human-set. A flag is a better home
-for the numbers than prose, not a licence for the agent to pick them (rule 15).
-Claude never writes this flag.
+Either way **scope it read-only.** Per the companion doc's §10, the hosted MCP
+server exposes 10 write tools including three unconfirmed permanent deletes,
+and its docs recommend a Writer or Developer role. None of that belongs in an
+agent bound by rule 1. RBAC is the enforcing boundary; the local server also
+offers `--scope read` and `--tool` allowlisting if you self-host it.
 
-**Keep `ONCALL.md`.** The prose sections that aren't values — the incident
-lifecycle rules, the out-of-band path, the read-only guarantee, the routing
-tree's rationale — stay in the file. Only the tables move. `ONCALL.md` gains a
-line saying which fields now live in the flag, so there is one obvious place to
-look and no ambiguity about which copy wins. (Rule 7 says files are truth; this
-is the one deliberate exception, and it needs to be written down rather than
-inferred.)
+**Keep `ONCALL.md`.** Only the *values* move. The lifecycle rules, the
+out-of-band path, the read-only guarantee, the routing rationale stay in the
+file, and `ONCALL.md` gains a line naming which fields now live in the flag —
+so there's one obvious place to look. Rule 7 says files are truth; this is the
+one deliberate exception and it needs writing down, not inferring.
 
-## 3. Seam 2 — verdicts via git, shipped by CI
+Claude never writes this flag. A flag is a better home for the numbers than
+prose, not a licence for the agent to pick them (rule 15).
 
-This is the part the decisions forced me to redesign, and the answer is better
-than what I had.
+### Seam 2 — verdicts via git, shipped by a script
 
-With no Slack app build and no service, there's no obvious path for an operator
-verdict to reach LaunchDarkly. The agent can't hold a write credential (rule 1,
-and the whole of the companion doc's §10). So: **git is the queue, CI is the
-shipper.**
+The mechanism survives the loss of Slack; only the verdict's *source* changes.
 
-1. **Claude reads the verdict from the channel.** A designated reaction set on
-   its own diagnosis — the kit already contemplates exactly this mechanism
-   (`ONCALL.md` names a `{{designated reaction}}` for acknowledgment). ✅
-   helpful · ❌ wrong cause · 🔀 wrong routing · 🚫 harmful.
+```
+graded replay → Claude appends shadow-log row → commit → script/CI → LD metric events
+```
+
+1. **Grade a diagnosis per `eval/replay.md`.** In Claude Code this is already
+   the documented procedure: open a NEW session, paste the blinded input, the
+   diagnosis as posted, and what actually happened, and grade ✅/⚠️/❌/🚫 with
+   the grader arguing for the lower grade where torn. A fresh session is what
+   makes the grade credible — the session that wrote a diagnosis never grades
+   it.
 2. **Claude appends a row to `eval/shadow-log.md`.** This file already exists
-   for this purpose, already has date / incident / grade / streak / grader
+   for this purpose, already carries date / incident / grade / streak / grader
    columns, and is already an enumerated permitted output under rule 1. No new
-   permission, no new file, no carve-out.
-3. **CI ships new rows as LD metric events on merge.** A small job diffs the
-   file, maps each new row to an event, posts it. A machine writes to
-   LaunchDarkly; the agent never does.
+   permission, no carve-out.
+3. **A script ships new rows as LD metric events.** Run it by hand at first; a
+   CI job later. A machine writes to LaunchDarkly; the agent never does.
 
-```
-Slack reaction → Claude appends shadow-log row → PR/commit → CI → LD metric events
-```
-
-Four events:
-
-| Event | Source | Carries |
+| Event | Source in Tier 1 | Carries |
 |---|---|---|
-| `oncall.diagnosis.posted` | Claude, at post time | agent id, incident id, failure class, confidence, evidence-link count, latency from alert |
-| `oncall.operator.verdict` | the designated reaction | helpful / wrong-cause / wrong-routing / harmful |
-| `oncall.fix.verified` | triage step 9's bounded watch | window, verified true/false |
+| `oncall.diagnosis.posted` | the replay run | failure class, confidence, evidence-link count |
+| `oncall.operator.verdict` | the grader's ✅/⚠️/❌/🚫 | grade, grader, streak |
+| `oncall.fix.verified` | the holdout's known outcome | whether the proposed fix matched what worked |
 | `oncall.page.decision` | `paging-log.md` | decided, clause that tripped, signal values |
 
-Three properties worth noting, because they're why this shape is right rather
-than merely expedient:
+Three properties are why this shape is right rather than merely expedient:
 
 - **It reuses the kit's existing safety envelope entirely.** Every write is to a
-  file rule 1 already names. The agent's credential set doesn't grow.
-- **The verdict is reviewable before it becomes data.** A human sees the
-  shadow-log row in a diff. That's a property a direct API write would lose.
-- **`oncall.fix.verified` and `harmful` are the two that matter.** They are
-  outcome signals rather than process signals, and together they are the entire
-  safety case for graduating off shadow mode. Everything else is texture.
+  file rule 1 already names; the agent's credential set doesn't grow.
+- **The verdict is reviewable before it becomes data** — a human sees the row in
+  a diff. A direct API write would lose that.
+- **`oncall.fix.verified` and any 🚫 are the two that matter.** They're outcome
+  signals rather than process signals, and together they're the entire safety
+  case for ever graduating this to Tier 2.
 
-Latency cost: verdicts arrive in LaunchDarkly at merge cadence, not in
-real time. For a dogfood measuring weekly trends, that's irrelevant.
+One thing to confirm: sending metric events needs an SDK key for some
+environment (or the events API). That's normally self-serve for someone with
+project access, but check before planning on it — and use a non-production
+environment.
 
-## 4. What the kit contributes that LaunchDarkly doesn't have
+---
 
-Worth being explicit, since Vega already investigates competently:
+## 3. Why replay-first is the better first test anyway
 
-1. **A graded record of whether diagnoses were any good**, attributable per
-   failure class and playbook version.
-2. **A shadow period** — the agent posts to a review channel and is graded
-   before anyone depends on it. `posture.shadow` plus the verdict events makes
-   graduation an evidence question (≥10 consecutive helpful, zero harmful) and
-   not a calendar one.
-3. **Policy the team owns and reviews**, rather than thresholds the agent
-   inferred.
+Losing live incidents sounds like a downgrade. It isn't, for this milestone:
 
-## 5. The capability map is unusually cheap here
+- **It's blind and repeatable.** Holdouts are incidents the playbooks were never
+  mined from, with a known outcome. You get a grade, not an impression.
+- **It's the companion doc's highest-leverage step** (§8 step 3) arriving first
+  by accident of constraint — the fixture corpus plus the grading rubric is
+  exactly the "evolution of the kit" loop.
+- **It generates evidence density live triage can't.** Ten graded holdouts in an
+  afternoon versus ten real incidents over a month.
+- **It exercises the paging dimension deliberately.** `eval/replay.md` requires
+  holdouts spanning failure classes *and* including page-severity incidents,
+  and requires you to say so explicitly when history has none — so the zero-🚫
+  bar isn't vacuous.
 
-A LaunchDarkly team dogfooding this needs fewer connectors than an outside
-team would, because **the LD MCP server covers three of the kit's capability
-bindings at once** — it spans feature management, AgentControl configs, and
-observability (logs, traces, errors, dashboards).
+A note for later: once you're grading at volume, the rubric is a natural fit for
+a **custom LD judge** invoked programmatically (`judge.evaluate(input, output)`,
+0.0–1.0 with reasoning). Generation has to stay local — a diagnosis needs live
+tool calls, which LD-side offline-eval generation can't do. Keep the human
+confirmation `eval/replay.md` requires; the judge replaces the scoring, not the
+authority.
 
-| `STACK.md` capability | Bound to | Via |
-|---|---|---|
-| `metrics` | LD Observability | LD MCP (read) |
-| `logs` | LD Observability | LD MCP (read) |
-| `flags` | LaunchDarkly | LD MCP (read) |
-| `code` / `deploys` | GitHub | existing connector |
-| `alert-channels`, `incidents` | Slack | Claude Tag |
-| `pager` | team's pager | to confirm |
+## 4. What Tier 1 cannot tell you
 
-**Scope the token read-only.** Per the companion doc's §10: the hosted MCP
-server has no `--scope`/`--tool` controls and its docs recommend a Writer or
-Developer role; the local server has `--scope read` and `--tool` allowlisting.
-Either way RBAC is the enforcing boundary — use a Reader base role or a custom
-role granting only the view actions the playbooks need. LaunchDarkly's own
-[security review](https://launchdarkly.atlassian.net/wiki/spaces/~7120202d087ecc5d974af4bdfb1fc4a3791aba/pages/4578181186)
-found the shipped MCP server exposes 10 write tools including three unconfirmed
-permanent deletes; none of those belong in an agent bound by rule 1.
+State these up front so the results don't get oversold:
 
-## 6. Where agent-agnosticism actually lives now
+- **Whether operators actually react.** The Slack reaction loop is untested
+  until Tier 2. Grader verdicts are a proxy, and a friendlier one than reality.
+- **Whether ambient operation is tolerable.** Noise, timing, and alert-storm
+  batching only show up with live traffic.
+- **Whether the rubber-stamp problem appears.** `eval/replay.md` names
+  acceptance-without-verification as the failure a replay score will never
+  catch. A graded replay is structurally incapable of measuring it.
+- **Time-to-first-diagnosis under real conditions.**
 
-Choosing Claude Tag makes the MVP's runtime Claude-specific. Being straight
-about that: **this MVP does not demonstrate agent-agnosticism. It preserves the
-seam for it.** The two schemas in §2 and §3 are runtime-neutral — a policy flag
-any agent can read, and an event vocabulary any agent can emit — so a second
-consumer can be added later without reworking either.
+## 5. Prerequisites
 
-One near-free experiment that *would* test the seam, worth running alongside
-rather than inside the MVP: **Vega already reads `CLAUDE.md`/`AGENTS.md` from
-the root of a connected repository as "repository instructions."** Point Vega
-at the same repo, with auto-remediation on an alert in read-only mode, and the
-kit's rule set governs a second agent with no code written at all. If both
-agents then triage the same incidents, the verdict events make them directly
-comparable — which is the interesting result, and costs roughly an afternoon of
-configuration.
+Much shorter than the Claude-Tag version:
 
-Treat that as a side experiment with its own small write-up. Don't let it grow
-into MVP scope.
+1. **Your own LD project** and a read-only token (or MCP added to your Claude
+   Code). Self-serve.
+2. **An SDK key in a non-production environment** for the events, or a decision
+   to defer Seam 2's shipping step and just accumulate shadow-log rows.
+3. **Real incident history to mine**, if you want Tier 1 on real playbooks
+   rather than fixture ones — 30–90 days of resolved incidents you can read.
+   Without it, run Tier 1 on the fixtures and treat the LD seams as the thing
+   under test rather than the playbooks.
 
-## 7. Product feedback to file (not blockers here)
+Nothing here needs another person's approval.
 
-- **Vega's mode selector is binary and the useful middle is missing.**
-  Read-only "never proposes or modifies code"; Agent mode opens PRs *and*
-  creates dashboards, graphs, and experiments and recommends flag changes. The
-  posture this kit wants — and that any review-gated agent wants — is
-  **"read-only, plus may open a pull request."** A PR is the ideal agent write:
-  inert until a human merges it. Worth raising independently; it would block a
-  customer-facing version of this MVP.
-- **Auto-remediation inherits the permissions of the member in "Last configured
-  by" on the alert.** The docs warn that remediation breaks if that member's
-  permissions change or their account is deactivated. For on-call that's worse
-  than breakage: the agent's read-only guarantee is only as narrow as a
-  person's role, and it changes silently when they move teams. A purpose-made
-  service identity should be supported and documented as the default.
+## 6. Definition of done
 
-## 8. Prerequisites to confirm before starting
+Tier 1 is done when it has produced evidence and an artifact:
 
-1. **Claude Tag availability.** The kit's surface requires @Claude as a member
-   of Slack channels, which needs a Claude Team or Enterprise plan and an org
-   Owner to attach connectors (`TAG-SETUP.md`). For an internal dogfood this is
-   a procurement and admin question, not a technical one — and it's the one
-   thing that can stop this before it starts. Confirm first.
-2. **A host team with real incident history.** Phase 1 of setup mines 30–90
-   days of resolved incidents. A team without that history gets thin playbooks.
-3. **A review channel** for shadow mode, separate from the live channel.
-4. **The `pager` binding**, or an explicit decision to run without one (the kit
-   degrades to the `ONCALL.md` fallback path and records the gap).
+- **Phase 3's own gate cleared** on blind holdouts — ≥70% ✅+⚠️ and zero 🚫
+  (`eval/replay.md`), written up in `eval/replay-results.md`.
+- **The policy flag was read and honored** — a diagnosis whose routing or paging
+  call demonstrably came from `oncall-policy` and changed when the flag changed.
+- **Verdict events visible on an LD dashboard**, with helpful-rate broken out by
+  failure class.
+- **A one-page write-up** answering: did the kit's playbooks beat unaided
+  triage on these incidents, and what would Tier 2 cost. That page is the ask
+  for connector access.
 
-## 9. Definition of done
+A Tier 1 that ends in "it seemed good" has failed regardless of how the agent
+performed.
 
-A dogfood is done when it has produced evidence, not features:
+## 7. Sequence
 
-- Setup ran end to end and **Phase 3 cleared its own gate** — ≥70% ✅+⚠️ on
-  blind holdouts, zero 🚫 (`eval/replay.md`).
-- **Four weeks of shadow operation** with the verdict events flowing, enough to
-  read a trend in helpful-rate and verified-fix rate.
-- A **decision**, either way, on whether to graduate off shadow — made from the
-  shadow log's streak column rather than from enthusiasm.
-- A short written answer to: did the kit's playbooks measurably beat what the
-  team's on-call did unaided, and did anyone have to read `lessons.md`?
+1. **Tier 0.** `test-fixtures/RUNBOOK.md`, one instruction, zero permissions.
+   Watch the full setup run and the graded replay against the answer key.
+   *Half a day.*
+2. **Add the LD read path** — token or MCP — and confirm Claude Code can read
+   flag change history and observability data in your project. *An hour.*
+3. **Create `oncall-policy`** and point the triage skill's context load at it.
+   *A day.*
+4. **Run a real replay:** 5–10 holdouts from your own history if you have it,
+   fixtures if not, graded in fresh sessions per `eval/replay.md`. *An
+   afternoon.*
+5. **Write the shadow-log → events script**, run it by hand, build the
+   dashboard. The only code in the MVP. *A day or two.*
+6. **Write the one-pager.** Then decide whether Tier 2 is worth asking for.
+7. **Side experiment, whenever:** Vega already reads `CLAUDE.md`/`AGENTS.md`
+   from a connected repo as repository instructions, so pointing it at this repo
+   with auto-remediation in read-only mode puts the kit's rules on a second
+   agent with no code at all — and the verdict schema makes the two comparable.
+   That's the cheapest real test of agent-agnosticism available. Needs Vega
+   enabled on the account; keep it out of MVP scope.
 
-A dogfood that ends with "it seemed good" has failed, regardless of how the
-agent performed.
+Steps 1 and 2 are reversible and cost almost nothing. Step 1 is where you find
+out whether any of the rest is worth doing.
 
-## 10. Sequence
+## 8. Risks
 
-1. **Confirm the prerequisites in §8.** Especially Claude Tag. *Days, mostly
-   waiting on people.*
-2. **Run the kit's setup as written** on the host team — Phases 0–3, gates
-   included. Nothing LaunchDarkly-specific yet; this is the kit doing its job.
-   *~2 hours of human time spread over the phases, per `examples/run1-webshop/`.*
-3. **Move `ONCALL.md`'s tables into `oncall-policy`** and point the triage
-   skill's context load at it. *A day.*
-4. **Add the shadow-log → CI → LD events job.** The only code in the MVP.
-   *A day or two.*
-5. **Shadow for four weeks**, grading daily per `eval/replay.md`.
-6. **Side experiment, in parallel:** Vega on the same repo (§6).
-7. **Then** revisit the companion doc's later steps — the fixture corpus as a
-   dataset with a custom judge, then the AgentControl primitives.
+- **Managed policy may block MCP in Claude Code too.** Mitigated: the read-only
+  API token path needs no MCP at all.
+- **SDK key access for events.** If it's not self-serve, defer Seam 2's shipping
+  step — shadow-log rows accumulate in git either way and can be replayed into
+  LaunchDarkly later. The seam is designed so the queue survives the shipper
+  being absent.
+- **Fixture-only results are weaker evidence.** The 48 fictional incidents
+  validate the machinery, not your team's failure modes. Say which corpus the
+  numbers came from, every time.
+- **Thin or missing page-severity holdouts** make the zero-🚫 bar vacuous.
+  `eval/replay.md` requires stating this explicitly rather than letting "zero
+  harmful" read as tested.
+- **Two copies of the policy** — tables in the flag, prose in `ONCALL.md`. Real
+  drift risk, mitigated only by recording the split, and the reason the
+  companion doc eventually wants source-of-truth sync.
+- **Tier 2 may never get approved.** Worth knowing that Tier 1 is independently
+  useful if so: the graded replay loop and the policy flag both stand alone, and
+  `lessons.md` accrues value with no deployment at all.
 
-Steps 1–2 involve no LaunchDarkly integration at all. That's deliberate: if the
-kit doesn't produce useful diagnoses for this team, the seams are wasted work,
-and step 2 is where you find out.
-
-## 11. Risks
-
-- **Claude Tag plan access is the single point of failure.** Everything else
-  has a workaround; this doesn't. Resolve it in step 1.
-- **Reaction-based verdict capture depends on operators reacting.** One emoji in
-  a thread they're already reading is about as low-friction as it gets, but if
-  the rate is low there's no signal. Watch it in week one; if it's poor, the
-  fallback is Claude asking once in-thread rather than building a Slack app.
-- **Two copies of the policy.** Tables in the flag, prose in `ONCALL.md`. Rule 7
-  says files win; this MVP creates one deliberate exception. Mitigated by
-  recording the split in `ONCALL.md` itself, but it is real drift risk and the
-  reason the companion doc wants source-of-truth sync eventually.
-- **A dogfood on a real on-call rotation carries real risk.** Shadow mode and
-  `paging_enabled: false` exist for this. Don't shorten the shadow period
-  because the diagnoses look good — the kit's own rule is that two weeks
-  triggers a mandatory review, not an automatic graduation.
-- **Thin incident history** produces thin playbooks and a vacuous paging
-  dimension in the replay (`eval/replay.md` requires saying so explicitly when
-  there are no page-severity holdouts).
-
-**Confidence: high** that this is the right MVP shape given the two decisions —
-it's mostly the kit running as designed, with the two cheapest seams from the
-companion analysis. **Medium** on the four-week shadow window being long enough
-to read a trend; that depends entirely on the host team's incident volume, and
-a quiet month means extending rather than concluding.
+**Confidence: high** that Tier 1 is fully doable without another person's
+approval, and that it's the right first milestone — it's mostly the kit doing
+what it already does, with two cheap seams attached. **Medium** on the events
+step, which depends on SDK-key self-service I can't verify from here. The
+observation that would most change the plan: if your org restricts both MCP and
+API token creation, Tier 1 collapses to Tier 0 plus a paper design, and the
+sensible move becomes finding the Owner conversation first after all.
